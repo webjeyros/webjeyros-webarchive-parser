@@ -6,237 +6,295 @@
 
 - 🔍 **Парсинг Web Archive** - Поиск доменов и контента по ключевым словам
 - 🌐 **Проверка доменов** - Определение занятости через WHOIS и HTTP-проверки
-- 📊 **Метрики авторитетности** - DA/PA/Alexa/SemRush через API seo-rank
-- 📋 **Планирование контента** - Рабочие процессы для редакторов
+- 📊 **SEO Метрики** - Бесплатные данные: Domain Authority, Backlinks, Spam Score (Majestic, Common Crawl)
+- 💾 **Хранение данных** - Все метрики сохраняются в БД для анализа
 - 👥 **Управление правами** - Разграничение доступа для команд
 - ⚡ **Оптимизация** - Queue-система, кэширование, соблюдение лимитов API
 - 📈 **Аналитика** - Отсортировка и экспорт найденных доменов
+- 🧠 **Интеллектуальная фильтрация** - Отсеивание мертвых доменов
 
 ## Варианты применения
 
-1. Наполнение сайтов релевантным контентом со старых доменов
-2. Поиск авторитетных доменов с исторической релевантностью
-3. Экономия на наполнении сайтов (бюджетная методика)
-4. Использование контента при размещении на сторонних площадках
-5. Наполнение Яндекс.Дзена и других платформ
-6. Поиск статей для перевода с англоязычного контента
+1. Поиск авторитетных доменов для покупки/переоформления
+2. Анализ доменной истории для SEO
+3. Определение потенциально ценных drop-доменов
+4. Сбор качественного контента со старых доменов
+5. Оценка домена перед инвестированием
+6. Составление черного списка спам-доменов
 
 ## Требования
 
 - PHP 8.1+
-- Laravel 11+
-- MySQL 8.0+
-- Redis (для кэширования и очередей)
+- Laravel 10+
+- MySQL 5.7+
+- Redis (опционально, для кэширования)
 - Composer
 
 ## Установка
 
+### 1. Клонирование репозитория
+
 ```bash
 git clone https://github.com/webjeyros/webjeyros-webarchive-parser.git
 cd webjeyros-webarchive-parser
+git checkout feature/free-seo-checker
+```
+
+### 2. Установка зависимостей
+
+```bash
 composer install
+composer require whois-api-india/php-whois-parser
+composer require guzzlehttp/guzzle
+```
+
+### 3. Конфигурация
+
+```bash
 cp .env.example .env
 php artisan key:generate
+```
+
+Обновите `.env`:
+
+```env
+DB_CONNECTION=mysql
+DB_HOST=127.0.0.1
+DB_DATABASE=webarchive_parser
+DB_USERNAME=root
+DB_PASSWORD=secret
+
+QUEUE_DRIVER=database
+
+# Optional: Paid APIs (для расширенных функций)
+MAJESTIC_API_KEY=your_free_key
+PAGES_API_KEY=your_key
+```
+
+### 4. Миграция БД
+
+```bash
 php artisan migrate
+```
+
+### 5. Запуск queue worker
+
+```bash
+php artisan queue:work --queue=default --timeout=600 --tries=2
+```
+
+## Быстрый старт
+
+### 1. Создание проекта
+
+```php
+php artisan tinker
+
+$project = \App\Models\Project::create(['name' => 'My Domain Research']);
+$keyword = $project->keywords()->create(['keyword' => 'best php hosting']);
+
+// Автоматически запустится ParseWaybackJob
+```
+
+### 2. Мониторинг процесса
+
+```bash
+# Запустить queue worker
 php artisan queue:work
 ```
 
-## Конфигурация
+### 3. Получение результатов
 
-### .env
+```php
+// Доступные домены
+$available = \App\Models\Domain::where('project_id', $project->id)
+    ->where('status', 'available')
+    ->orderByDesc('domain_authority')
+    ->get();
 
-```env
-# Web Archive API (Wayback Machine)
-WAYBACK_API_URL=https://archive.org/wayback/available
-
-# WHOIS сервер для проверки доменов
-WHOIS_SERVER=whois.com
-
-# seo-rank API для проверки авторитетности
-SEORANK_API_KEY=your_api_key
-SEORANK_API_URL=https://api.seo-rank.com
-SEORANK_RATE_LIMIT=1000
-
-# Яндекс API для проверки уникальности
-YANDEX_API_KEY=your_yandex_api_key
-
-# Redis для кэширования
-CACHE_DRIVER=redis
-QUEUE_CONNECTION=redis
+// Занятые домены с хорошим авторитетом
+$good = \App\Models\Domain::where('project_id', $project->id)
+    ->where('status', 'occupied')
+    ->where('domain_authority', '>=', 30)
+    ->where('spam_score', '<', 10)
+    ->orderByDesc('backlink_count')
+    ->get();
 ```
 
-## Процесс работы
+## Бесплатные источники SEO данных
 
-### Этап 1: Создание проекта и парсинг
+| Source | Limit | Данные |
+|--------|-------|--------|
+| **Majestic Free** | 600 req/day | CF, TF, Links, Domains |
+| **Common Crawl** | Unlimited | Archive Data, Indexed Pages |
+| **Whois APIs** | 500/day | WHOIS, registrar, dates |
+| **DNS Lookups** | Unlimited | Nameservers, MX, A records |
+| **HTTP Status** | Unlimited | Response codes, headers |
+| **Google Search** | Unlimited | Indexed pages check |
 
-1. Создание проекта
-2. Добавление ключевых слов
-3. Парсинг Web Archive - получение списка доменов со сниппетами
-
-### Этап 2: Проверка доменов
-
-1. Проверка ответа от доменов (HTTP-статус)
-2. WHOIS-проверка занятости
-3. Проверка авторитетности через seo-rank API
-
-### Этап 3: Работа с контентом
-
-1. Проверка уникальности через Яндекс
-2. Добавление в план работы
-3. Отслеживание прогресса (кнопка "взята")
-4. Экспорт результатов
-
-### Этап 4: Командная работа
-
-1. Создание плана доступа для сотрудников
-2. Разграничение прав (только чтение/редактирование)
-3. Отслеживание прогресса команды
+**Дополнительно:** Платные APIs (опционально) для расширенных метрик
 
 ## Архитектура
 
+### Основные компоненты
+
 ```
-app/
-├── Models/
-│   ├── Project.php              # Проект сборки
-│   ├── Keyword.php              # Ключевые слова
-│   ├── Domain.php               # Найденные домены
-│   ├── DomainMetric.php         # Метрики доменов (DA/PA/Alexa)
-│   ├── Content.php              # Содержимое статей
-│   ├── ContentPlan.php          # План сборки контента
-│   ├── User.php                 # Пользователи
-│   └── ProjectAccess.php        # Доступ к проектам
-├── Services/
-│   ├── WaybackService.php       # Парсинг Web Archive
-│   ├── DomainAvailabilityService.php  # Проверка доменов
-│   ├── WhoisService.php         # WHOIS запросы
-│   ├── SeoRankService.php       # API seo-rank
-│   ├── UniqueCheckerService.php # Проверка уникальности
-│   └── DomainMetricsService.php # Сбор метрик доменов
-├── Jobs/
-│   ├── ParseWaybackJob.php      # Job парсинга
-│   ├── CheckDomainAvailabilityJob.php
-│   ├── CheckDomainMetricsJob.php
-│   └── CheckContentUniquenessJob.php
-├── Http/Controllers/
-│   ├── ProjectController.php
-│   ├── DomainController.php
-│   ├── ContentController.php
-│   └── PlanController.php
-└── Http/Resources/
-    ├── ProjectResource.php
-    ├── DomainResource.php
-    └── ContentResource.php
+Keyword (ключевое слово)
+    ↓
+ParseWaybackJob (поиск в Wayback Machine)
+    ↓
+Domain (найденный домен)
+    ↓
+CheckDomainAvailabilityJob (WHOIS, DNS, HTTP)
+    ↓
+CheckDomainSeoJob (SEO метрики)
+    ↓
+Database (сохранение всех данных)
 ```
 
-## API Endpoints
+### Jobs (фоновые задачи)
 
-### Проекты
+- **ParseWaybackJob** - Поиск доменов по ключевым словам
+- **CheckDomainAvailabilityJob** - Проверка WHOIS и HTTP статуса
+- **CheckDomainSeoJob** - Сбор SEO метрик из бесплатных источников
 
-- `POST /api/projects` - Создание проекта
-- `GET /api/projects` - Список проектов
-- `GET /api/projects/{id}` - Детали проекта
-- `PATCH /api/projects/{id}` - Обновление проекта
-- `DELETE /api/projects/{id}` - Удаление проекта
+### Services (бизнес-логика)
 
-### Ключи и парсинг
+- **WaybackService** - Работа с Wayback Machine API
+- **DomainCheckerService** - Проверка доменов (WHOIS, DNS, HTTP)
+- **SeoMetricsService** - Сбор SEO данных (Majestic, Common Crawl)
 
-- `POST /api/projects/{id}/keywords` - Добавление ключей
-- `POST /api/projects/{id}/parse` - Запуск парсинга Web Archive
+## Структура БД
 
-### Домены
+### Таблица `domains`
 
-- `GET /api/projects/{id}/domains` - Список доменов проекта
-- `GET /api/projects/{id}/domains/{domainId}` - Детали домена
-- `POST /api/projects/{id}/domains/{domainId}/check-metrics` - Проверка метрик
-- `PATCH /api/projects/{id}/domains/{domainId}` - Обновление статуса домена
+```
+- id, project_id, keyword_id, domain
+- status (new, checking, available, occupied, dead, in_work)
+- available (boolean)
 
-### Контент и планирование
+# HTTP/DNS
+- http_status_code, ip_address, last_http_check
+- nameserver_1, nameserver_2, nameserver_3
 
-- `GET /api/projects/{id}/content` - Список контента
-- `POST /api/projects/{id}/content/{contentId}/plan` - Добавление в план
-- `GET /api/projects/{id}/plan` - План сборки
-- `PATCH /api/projects/{id}/plan/{contentId}/taken` - Отметить как "взято"
+# WHOIS
+- registrar, created_date, updated_date, expiration_date
 
-### Управление доступом
+# SEO Metrics
+- domain_authority, spam_score, backlink_count, referring_domains
+- indexed_pages, external_links, internal_links
 
-- `POST /api/projects/{id}/access` - Предоставить доступ
-- `GET /api/projects/{id}/access` - Список доступов
-- `DELETE /api/projects/{id}/access/{userId}` - Отозвать доступ
+# Metadata
+- metrics_source, metrics_checked_at, metrics_available
+```
 
-## Использование
+## Примеры использования
 
-### Пример: Создание и запуск парсинга
+### Пример 1: Найти лучшие доступные домены
 
 ```php
-$project = Project::create([
-    'name' => 'SEO Content Mining',
-    'description' => 'Поиск авторитетных доменов для наполнения',
-    'user_id' => auth()->id(),
-]);
-
-$keywords = ['machine learning', 'artificial intelligence', 'deep learning'];
-$project->keywords()->createMany(
-    collect($keywords)->map(fn($k) => ['keyword' => $k])->toArray()
-);
-
-// Запуск парсинга через job
-ParseWaybackJob::dispatch($project);
+$bestAvailable = \App\Models\Domain::where('project_id', $projectId)
+    ->where('status', 'available')
+    ->where('domain_authority', '>=', 20)
+    ->orderByDesc('domain_authority')
+    ->paginate(50);
 ```
 
-### Пример: Проверка метрик доменов
+### Пример 2: Найти занятые домены для покупки
 
 ```php
-$domain = Domain::find($domainId);
-
-// Проверка авторитетности
-CheckDomainMetricsJob::dispatch($domain);
-
-// Или напрямую через service
-$metricsService = app(DomainMetricsService::class);
-$metrics = $metricsService->fetchMetrics($domain->name);
+$candidates = \App\Models\Domain::where('project_id', $projectId)
+    ->where('status', 'occupied')
+    ->where('spam_score', '<', 15)
+    ->where('backlink_count', '>', 10)
+    ->where('expiration_date', '<', now()->addMonths(3))
+    ->orderByDesc('domain_authority')
+    ->get();
 ```
 
-### Пример: Управление планом
+### Пример 3: Экспорт в CSV
 
 ```php
-$project = Project::find($projectId);
-$content = Content::find($contentId);
+$domains = \App\Models\Domain::where('project_id', $projectId)->get();
 
-// Добавить в план
-$plan = $project->contentPlans()->create([
-    'content_id' => $content->id,
-    'user_id' => auth()->id(),
-    'status' => 'pending',
-]);
+$csv = "domain,da,spam,backlinks,expiration\n";
+foreach ($domains as $d) {
+    $csv .= "{$d->domain},{$d->domain_authority},{$d->spam_score},{$d->backlink_count},{$d->expiration_date}\n";
+}
 
-// Отметить как "взято"
-$plan->update(['status' => 'taken', 'taken_at' => now()]);
+file_put_contents('domains.csv', $csv);
 ```
 
-## Производительность и оптимизация
+### Пример 4: Получить SEO Health Score
 
-### Queue-система
+```php
+$domain = \App\Models\Domain::find($domainId);
+$healthScore = $domain->getSeoHealthScore(); // 0-100
 
-- Парсинг Web Archive - `high` приоритет
-- Проверка доменов - `default` приоритет
-- Проверка метрик - `low` приоритет (высокое количество)
+echo "Domain: {$domain->domain} - Health: {$healthScore}/100";
 
-### Кэширование
+if ($domain->isExpiringsoon()) {
+    echo " (Expiring soon!)";
+}
+```
 
-- Результаты WHOIS кэшируются на 7 дней
-- Метрики доменов кэшируются на 30 дней
-- Результаты парсинга Web Archive кэшируются на 1 день
+## Документация
 
-### Rate Limiting
+📚 [SEO Checker Guide](./SEO_CHECKER_GUIDE.md) - Полное руководство со всеми деталями
 
-- seo-rank API: 1000 проверок за $0.04
-- Автоматическое соблюдение лимитов
-- Батчинг запросов (максимум 100 за раз)
-- Retry механика с exponential backoff
+## Лимиты и оптимизация
+
+### Бесплатные лимиты
+
+- **Majestic**: 600 запросов в день (~18-24 домена)
+- **Whois**: ~500 запросов в день
+- **Google**: Unlimited но с rate limiting по IP
+- **Common Crawl**: Unlimited (медленно)
+
+### Рекомендации
+
+✅ Запускайте проверки ночью
+✅ Используйте rate limiting в сервисах
+✅ Кэшируйте результаты (Redis)
+✅ Обрабатывайте батчи по 10-20 доменов
+✅ Используйте database queue для надежности
+
+## Статусы доменов
+
+| Status | Значение |
+|--------|----------|
+| **new** | Новый найденный домен |
+| **checking** | Идет проверка |
+| **available** | Домен свободен |
+| **occupied** | Домен занят |
+| **dead** | Домен не отвечает |
+| **in_work** | В процессе обработки |
+
+## Производительность
+
+- **ParseWaybackJob**: ~2-5 сек на 1 ключевое слово
+- **CheckDomainAvailabilityJob**: ~0.5-1 сек на 1 домен
+- **CheckDomainSeoJob**: ~2-3 сек на 1 домен (зависит от API)
+
+**Итого**: ~3-4 сек на полную проверку 1 домена
+
+## Roadmap
+
+- [ ] Веб-интерфейс для управления проектами
+- [ ] Экспорт в различные форматы (XLSX, JSON)
+- [ ] Telegram уведомления
+- [ ] Интеграция с Google Search Console
+- [ ] Расширенная аналитика
+- [ ] Сравнение доменов
+- [ ] История мониторинга
 
 ## Лицензия
 
-MIT
+MIT License
+
+## Автор
+
+[Webjeyros](https://github.com/webjeyros)
 
 ## Поддержка
 
