@@ -3,290 +3,271 @@
 namespace App\Services;
 
 use Illuminate\Support\Facades\Http;
-use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Log;
 use Exception;
-use Throwable;
 
 class DomainCheckerService
 {
-    // Using free WHOIS APIs and DNS checks
-    private const WHOISJSON_API = 'https://whoisjson.com/api/v1';
-    private const CACHE_TTL = 86400; // 1 day
-    private const TIMEOUT = 10;
+    private const HTTP_TIMEOUT = 5;
+    private const MAX_RETRIES = 2;
+    private const VALID_STATUS_CODE = 200; // Нас интересуют оние 200 домены
 
     /**
-     * Check if domain is available for registration
-     */
-    public function checkAvailability(string $domain): array
-    {
-        $domain = $this->cleanDomain($domain);
-        $cacheKey = "domain_availability:" . $domain;
-
-        return Cache::remember($cacheKey, self::CACHE_TTL, function () use ($domain) {
-            return $this->fetchAvailability($domain);
-        });
-    }
-
-    /**
-     * Check HTTP status and basic domain info
-     */
-    public function checkHttpStatus(string $domain): array
-    {
-        $domain = $this->cleanDomain($domain);
-        $cacheKey = "domain_http_status:" . $domain;
-
-        return Cache::remember($cacheKey, self::CACHE_TTL, function () use ($domain) {
-            return $this->fetchHttpStatus($domain);
-        });
-    }
-
-    /**
-     * Get basic DNS and WHOIS info using free methods
-     */
-    public function getDomainInfo(string $domain): array
-    {
-        $domain = $this->cleanDomain($domain);
-        $cacheKey = "domain_info:" . $domain;
-
-        return Cache::remember($cacheKey, self::CACHE_TTL, function () use ($domain) {
-            return $this->fetchDomainInfo($domain);
-        });
-    }
-
-    /**
-     * Check DNS records
-     */
-    public function checkDNS(string $domain): array
-    {
-        $domain = $this->cleanDomain($domain);
-        $cacheKey = "domain_dns:" . $domain;
-
-        return Cache::remember($cacheKey, self::CACHE_TTL, function () use ($domain) {
-            return $this->fetchDNS($domain);
-        });
-    }
-
-    /**
-     * Comprehensive domain check (all methods)
+     * Комплексная проверка домена (ОПТИМИЗИРОВАННАЯ)
+     *
+     * 1. Сначала HTTP проверка - если не 200, то домен мертвой
+     * 2. При HTTP 200 - проверяем DNS
+     * 3. Если DNS есть, то WHOIS для точного статуса
      */
     public function comprehensiveCheck(string $domain): array
     {
+        $domain = $this->normalizeDomain($domain);
+
         try {
-            $domain = $this->cleanDomain($domain);
+            // ШАГ 1: HTTP ПРОВЕРКА (ВАЖНО: Нас интересуют нАЛИЧНЫЕ домены 200)
+            $httpCheck = $this->checkHttpStatus($domain);
 
-            $availability = $this->checkAvailability($domain);
-            $httpStatus = $this->checkHttpStatus($domain);
-            $domainInfo = $this->getDomainInfo($domain);
-            $dnsInfo = $this->checkDNS($domain);
-
-            return [
-                'domain' => $domain,
-                'available' => $availability['available'] ?? false,
-                'availability_data' => $availability,
-                'http_status' => $httpStatus['status'] ?? null,
-                'http_data' => $httpStatus,
-                'domain_info' => $domainInfo,
-                'dns_info' => $dnsInfo,
-                'checked_at' => now(),
-            ];
-        } catch (Throwable $e) {
-            return [
-                'domain' => $domain ?? 'unknown',
-                'error' => $e->getMessage(),
-                'checked_at' => now(),
-            ];
-        }
-    }
-
-    /**
-     * Fetch availability data from WhoisJSON API (free)
-     */
-    private function fetchAvailability(string $domain): array
-    {
-        try {
-            // Using ICANN registry check method
-            $response = Http::timeout(self::TIMEOUT)
-                ->get("https://api.whoisxmlapi.com/v1/whois-lookup", [
-                    'domainName' => $domain,
-                    'format' => 'json',
-                    'outputFormat' => 'JSON',
-                ])
-                ->json();
-
-            // Fallback to simple DNS check if API limited
-            if (isset($response['statusCode']) && $response['statusCode'] != 0) {
-                return $this->checkViaDNS($domain);
+            // Определяем домен как доступный только если HTTP 200
+            if ($httpCheck['http_status'] !== self::VALID_STATUS_CODE) {
+                // Сразу возвращаем - не тратим лимиты
+                return [
+                    'available' => false,
+                    'http_status' => $httpCheck['http_status'],
+                    'ip_address' => $httpCheck['ip_address'] ?? null,
+                    'availability_data' => [
+                        'status' => 'dead_or_occupied',
+                        'reason' => 'HTTP status not 200: ' . $httpCheck['http_status'],
+                    ]
+                ];
             }
 
-            $whoisData = $response['whoisData'] ?? [];
+            // ШАГ 2: DNS ПРОВЕРКА
+            $dnsRecords = $this->checkDnsRecords($domain);
+
+            // ШАГ 3: WHOIS (ТОЛЬКО ЕСЛИ DNS существует)
+            $whoisData = [];
+            if (!empty($dnsRecords['nameservers'])) {
+                $whoisData = $this->getWhoisInfo($domain);
+            }
 
             return [
-                'available' => empty($whoisData),
-                'registrar' => $whoisData['registrar'] ?? null,
-                'created_date' => $whoisData['createdDate'] ?? null,
-                'expiration_date' => $whoisData['expiresDate'] ?? null,
-                'updated_date' => $whoisData['updatedDate'] ?? null,
-                'nameserver_1' => $whoisData['nameServers'][0] ?? null,
-                'nameserver_2' => $whoisData['nameServers'][1] ?? null,
-                'nameserver_3' => $whoisData['nameServers'][2] ?? null,
-                'source' => 'whoisxml',
+                'available' => true,  // HTTP 200 = домен занят и работает
+                'http_status' => $httpCheck['http_status'],
+                'ip_address' => $httpCheck['ip_address'] ?? null,
+                'availability_data' => array_merge($dnsRecords, $whoisData, [
+                    'status' => 'active',
+                    'checked_at' => now()->toDateTimeString(),
+                ])
             ];
-        } catch (Throwable $e) {
-            logger()->debug("WhoisXML API error: " . $e->getMessage());
-            // Fallback to DNS check
-            return $this->checkViaDNS($domain);
+        } catch (Exception $e) {
+            Log::warning("Domain check error for {$domain}: " . $e->getMessage());
+
+            return [
+                'available' => false,
+                'http_status' => 0,
+                'availability_data' => [
+                    'status' => 'error',
+                    'reason' => $e->getMessage(),
+                ]
+            ];
         }
     }
 
     /**
-     * Check availability via DNS (completely free)
+     * HTTP проверка (только HTTP 200 = важны)
      */
-    private function checkViaDNS(string $domain): array
+    private function checkHttpStatus(string $domain): array
     {
-        try {
-            $records = @dns_get_record($domain, DNS_ANY);
-            $available = empty($records);
+        $result = [
+            'http_status' => 0,
+            'ip_address' => null,
+        ];
 
-            $nameservers = [];
-            if (!empty($records)) {
-                foreach ($records as $record) {
-                    if ($record['type'] === 'NS') {
+        for ($i = 0; $i < self::MAX_RETRIES; $i++) {
+            try {
+                $response = Http::timeout(self::HTTP_TIMEOUT)
+                    ->withoutRedirecting()
+                    ->get("http://{$domain}");
+
+                $result['http_status'] = $response->status();
+
+                // Получаем IP адрес
+                $ip = gethostbyname($domain);
+                if ($ip && filter_var($ip, FILTER_VALIDATE_IP)) {
+                    $result['ip_address'] = $ip;
+                }
+
+                // Иесли достали ответ, то выкодим
+                break;
+            } catch (Exception $e) {
+                if ($i === self::MAX_RETRIES - 1) {
+                    $result['http_status'] = 0; // Таймаут или ошибка
+                }
+                usleep(500000); // 0.5 sec delay before retry
+            }
+        }
+
+        return $result;
+    }
+
+    /**
+     * DNS проверка
+     */
+    private function checkDnsRecords(string $domain): array
+    {
+        $result = [
+            'nameserver_1' => null,
+            'nameserver_2' => null,
+            'nameserver_3' => null,
+            'has_dns' => false,
+        ];
+
+        try {
+            // Получаем NS рекорды
+            $records = dns_get_record($domain, DNS_NS);
+
+            if (is_array($records) && count($records) > 0) {
+                $result['has_dns'] = true;
+                $nameservers = [];
+
+                foreach ($records as $index => $record) {
+                    if (isset($record['target'])) {
                         $nameservers[] = $record['target'];
                     }
+                    if (count($nameservers) >= 3) break;
+                }
+
+                // Наполняем nameserver fields
+                for ($i = 0; $i < count($nameservers); $i++) {
+                    $result['nameserver_' . ($i + 1)] = $nameservers[$i];
                 }
             }
-
-            return [
-                'available' => $available,
-                'has_dns_records' => !$available,
-                'nameservers' => $nameservers,
-                'source' => 'dns_check',
-            ];
-        } catch (Throwable $e) {
-            logger()->debug("DNS check error: " . $e->getMessage());
-            return [
-                'available' => null,
-                'error' => 'dns_check_failed',
-                'source' => 'dns_check',
-            ];
+        } catch (Exception $e) {
+            Log::debug("DNS check error for {$domain}: " . $e->getMessage());
         }
+
+        return $result;
     }
 
     /**
-     * Fetch HTTP status
+     * WHOIS информация (только если DNS есть)
      */
-    private function fetchHttpStatus(string $domain): array
+    private function getWhoisInfo(string $domain): array
     {
-        try {
-            $url = "https://" . $domain;
-
-            // Try HTTPS first
-            try {
-                $response = Http::timeout(5)
-                    ->withoutVerifying() // Skip SSL for dead domains
-                    ->head($url);
-
-                return [
-                    'status' => $response->status(),
-                    'available' => in_array($response->status(), [200, 301, 302, 303, 304, 307, 308]),
-                    'protocol' => 'https',
-                    'checked_at' => now(),
-                ];
-            } catch (Throwable $e) {
-                // Try HTTP
-                $url = "http://" . $domain;
-                $response = Http::timeout(5)->head($url);
-
-                return [
-                    'status' => $response->status(),
-                    'available' => in_array($response->status(), [200, 301, 302, 303, 304, 307, 308]),
-                    'protocol' => 'http',
-                    'checked_at' => now(),
-                ];
-            }
-        } catch (Throwable $e) {
-            return [
-                'status' => 0,
-                'available' => false,
-                'error' => $e->getMessage(),
-                'checked_at' => now(),
-            ];
-        }
-    }
-
-    /**
-     * Get domain info
-     */
-    private function fetchDomainInfo(string $domain): array
-    {
-        return [
-            'domain' => $domain,
-            'tld' => $this->extractTLD($domain),
-            'checked_at' => now(),
+        $result = [
+            'registrar' => null,
+            'created_date' => null,
+            'updated_date' => null,
+            'expiration_date' => null,
         ];
+
+        try {
+            // Можно использовать бесплатные WHOIS серверы
+            $whoisServers = [
+                'com' => 'whois.verisign-grs.com',
+                'net' => 'whois.verisign-grs.com',
+                'org' => 'whois.pir.org',
+                'info' => 'whois.afilias.net',
+                'biz' => 'whois.neulevel.biz',
+                'ru' => 'whois.tcinet.ru',
+                'su' => 'whois.tcinet.ru',
+            ];
+
+            $tld = $this->getTld($domain);
+            $whoisServer = $whoisServers[$tld] ?? 'whois.com';
+
+            // Сработает только бесплатные серверы
+            $whoisData = $this->queryWhoisServer($whoisServer, $domain);
+            if ($whoisData) {
+                $result = $this->parseWhoisResponse($whoisData, $tld);
+            }
+        } catch (Exception $e) {
+            Log::debug("WHOIS check error for {$domain}: " . $e->getMessage());
+        }
+
+        return $result;
     }
 
     /**
-     * Fetch DNS records
+     * Обращение к WHOIS серверу
      */
-    private function fetchDNS(string $domain): array
+    private function queryWhoisServer(string $server, string $domain): ?string
     {
         try {
-            $records = [
-                'A' => dns_get_record($domain, DNS_A),
-                'MX' => dns_get_record($domain, DNS_MX),
-                'NS' => dns_get_record($domain, DNS_NS),
-                'TXT' => dns_get_record($domain, DNS_TXT),
-            ];
+            $connection = fsockopen($server, 43, $errno, $errstr, 3);
+            if (!$connection) {
+                return null;
+            }
 
-            // Filter out empty results
-            $records = array_filter($records, fn($v) => !empty($v));
+            fwrite($connection, $domain . "\r\n");
+            $response = '';
 
-            return [
-                'records' => $records,
-                'has_dns' => !empty($records),
-            ];
-        } catch (Throwable $e) {
-            logger()->debug("DNS records fetch error: " . $e->getMessage());
-            return [
-                'records' => [],
-                'has_dns' => false,
-                'error' => $e->getMessage(),
-            ];
+            while (!feof($connection)) {
+                $response .= fgets($connection, 128);
+            }
+            fclose($connection);
+
+            return $response ?: null;
+        } catch (Exception $e) {
+            return null;
         }
     }
 
     /**
-     * Clean domain name
+     * Парсинг WHOIS респонса
      */
-    private function cleanDomain(string $domain): string
+    private function parseWhoisResponse(string $response, string $tld): array
     {
-        $domain = strtolower(trim($domain));
-        $domain = preg_replace('/^https?:\/\//i', '', $domain);
-        $domain = preg_replace('/^www\./i', '', $domain);
-        $domain = trim($domain, '/\\');
+        $result = [
+            'registrar' => null,
+            'created_date' => null,
+            'updated_date' => null,
+            'expiration_date' => null,
+        ];
 
-        return $domain;
+        // Обработка разных форматов WHOIS
+        $patterns = [
+            'registrar' => ['Registrar:', 'registrar:', 'Регистратор:'],
+            'created_date' => ['Creation Date:', 'created:', 'Date de cr'],
+            'updated_date' => ['Updated Date:', 'Last Updated:', 'Updated:'],
+            'expiration_date' => ['Registry Expiry Time:', 'Expiry Date:', 'expiration date:'],
+        ];
+
+        foreach ($patterns as $key => $keywords) {
+            foreach ($keywords as $keyword) {
+                if (preg_match('/' . $keyword . '\s+(.+)$/im', $response, $matches)) {
+                    $value = trim($matches[1]);
+                    if ($key !== 'registrar') {
+                        // Парсим даты
+                        $timestamp = strtotime($value);
+                        if ($timestamp) {
+                            $result[$key] = date('Y-m-d H:i:s', $timestamp);
+                        }
+                    } else {
+                        $result[$key] = substr($value, 0, 100); // Ограничиваем длину
+                    }
+                    break;
+                }
+            }
+        }
+
+        return $result;
     }
 
     /**
-     * Extract TLD from domain
+     * Получить TLD домена
      */
-    private function extractTLD(string $domain): string
+    private function getTld(string $domain): string
     {
         $parts = explode('.', $domain);
-        return end($parts);
+        return strtolower(end($parts));
     }
 
     /**
-     * Clear cache for domain
+     * Нормализация домена
      */
-    public function clearCache(string $domain): void
+    private function normalizeDomain(string $domain): string
     {
-        $domain = $this->cleanDomain($domain);
-        Cache::forget("domain_availability:" . $domain);
-        Cache::forget("domain_http_status:" . $domain);
-        Cache::forget("domain_info:" . $domain);
-        Cache::forget("domain_dns:" . $domain);
+        return strtolower(preg_replace('/^(https?:\/\/)?(www\.)/', '', $domain));
     }
 }
