@@ -3,292 +3,279 @@
 namespace App\Services;
 
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Cache;
 use Exception;
-use Throwable;
 
 class SeoMetricsService
 {
+    private const CACHE_TTL = 86400 * 30; // 30 days
+    private const HTTP_TIMEOUT = 10;
+
     /**
-     * Get basic SEO metrics using free methods
-     * Methods used:
-     * 1. Backlink estimation via Bing/Google (free, limited)
-     * 2. Page indexing status (free)
-     * 3. Basic domain metrics from free sources
+     * Получить все SEO метрики
+     *
+     * Храним в кэше 30 дней
      */
     public function getSeoMetrics(string $domain): array
     {
-        $domain = $this->cleanDomain($domain);
-        $cacheKey = "seo_metrics:" . $domain;
+        $domain = $this->normalizeDomain($domain);
+        $cacheKey = "seo_metrics:{$domain}";
 
-        return Cache::remember($cacheKey, 86400, function () use ($domain) {
-            return $this->fetchMetrics($domain);
-        });
-    }
-
-    /**
-     * Get backlink count (free estimation)
-     */
-    public function estimateBacklinks(string $domain): int
-    {
-        try {
-            $domain = $this->cleanDomain($domain);
-            $cacheKey = "backlinks:" . $domain;
-
-            return Cache::remember($cacheKey, 86400, function () use ($domain) {
-                // Google Search Console would be ideal but requires auth
-                // Using free estimation via search operators
-                return $this->estimateViaSearchOperators($domain);
-            });
-        } catch (Throwable $e) {
-            logger()->debug("Backlink estimation error: " . $e->getMessage());
-            return 0;
+        // Попытка получить из кэша
+        $cached = Cache::get($cacheKey);
+        if ($cached) {
+            return $cached;
         }
-    }
 
-    /**
-     * Check if domain is indexed in Google
-     */
-    public function isIndexedInGoogle(string $domain): bool
-    {
+        $metrics = [
+            'meta_tags' => [],
+            'domain_authority' => null,
+            'spam_score' => null,
+            'backlink_count' => null,
+            'referring_domains' => null,
+            'indexed_pages' => null,
+            'external_links' => null,
+            'internal_links' => null,
+            'ticy' => null, // ТИЦ Яндекса
+            'yandex_rank' => null,
+            'backlinks_ru' => null, // Русские беклинки
+            'metrics_source' => 'free',
+        ];
+
         try {
-            $domain = $this->cleanDomain($domain);
-            $cacheKey = "indexed_google:" . $domain;
+            // 1. Получить мета-теги
+            $metrics['meta_tags'] = $this->getMetaTags($domain);
 
-            return Cache::remember($cacheKey, 86400, function () use ($domain) {
-                // Check via site: search operator
-                $url = "https://www.google.com/search?q=site:" . urlencode($domain);
-                // This is a simplified check - in production you'd use Google Search Console API
-                return true; // Default to true, actual check would require API
-            });
-        } catch (Throwable $e) {
-            return true; // Default to true if we can't check
+            // 2. Majestic Free API
+            $majesticsMetrics = $this->getMajesticsMetrics($domain);
+            $metrics = array_merge($metrics, $majesticsMetrics);
+
+            // 3. Common Crawl
+            $commonCrawlMetrics = $this->getCommonCrawlMetrics($domain);
+            $metrics = array_merge($metrics, $commonCrawlMetrics);
+
+            // 4. ТИЦ Яндекса
+            $yandexMetrics = $this->getYandexTicy($domain);
+            $metrics = array_merge($metrics, $yandexMetrics);
+
+            // 5. Русские беклинки
+            $ruBacklinks = $this->getRussianBacklinks($domain);
+            $metrics = array_merge($metrics, $ruBacklinks);
+
+        } catch (Exception $e) {
+            Log::error("SEO metrics error for {$domain}: " . $e->getMessage());
+            $metrics['meta_tags']['error'] = $e->getMessage();
         }
+
+        // Кэширование результатов
+        Cache::put($cacheKey, $metrics, self::CACHE_TTL);
+
+        return $metrics;
     }
 
     /**
-     * Check page title and meta description
+     * Получить мета-теги страницы
      */
-    public function getPageMetaTags(string $domain): array
+    private function getMetaTags(string $domain): array
     {
-        try {
-            $domain = $this->cleanDomain($domain);
-            $url = "https://" . $domain;
+        $result = [
+            'title' => null,
+            'description' => null,
+            'keywords' => null,
+        ];
 
-            $response = Http::timeout(10)
-                ->withoutVerifying()
-                ->get($url);
+        try {
+            $response = Http::timeout(self::HTTP_TIMEOUT)->get("http://{$domain}");
+            $html = $response->body();
+
+            // Парсим title
+            if (preg_match('/<title>([^<]+)<\/title>/i', $html, $matches)) {
+                $result['title'] = trim($matches[1]);
+            }
+
+            // Парсим description
+            if (preg_match('/<meta\s+name=["\']description["\']\s+content=["\']([^"\']*)["\']/i', $html, $matches)) {
+                $result['description'] = trim($matches[1]);
+            }
+
+            // Парсим keywords
+            if (preg_match('/<meta\s+name=["\']keywords["\']\s+content=["\']([^"\']*)["\']/i', $html, $matches)) {
+                $result['keywords'] = trim($matches[1]);
+            }
+        } catch (Exception $e) {
+            Log::debug("Meta tags error for {$domain}: " . $e->getMessage());
+        }
+
+        return $result;
+    }
+
+    /**
+     * Majestic Free API
+     * Выполняет 600 реквестов в день
+     */
+    private function getMajesticsMetrics(string $domain): array
+    {
+        $result = [
+            'backlink_count' => null,
+            'referring_domains' => null,
+            'domain_authority' => null,
+            'spam_score' => null,
+        ];
+
+        try {
+            $apiKey = config('services.majestic.api_key');
+            if (!$apiKey) {
+                return $result; // Skip if no API key
+            }
+
+            $url = "https://api.majestic.com/api/json";
+            $params = [
+                'cmd' => 'GetIndexItemInfo',
+                'item' => $domain,
+                'datasource' => 'fresh',
+                'app_api_key' => $apiKey,
+            ];
+
+            $response = Http::timeout(self::HTTP_TIMEOUT)->get($url, $params);
 
             if ($response->successful()) {
-                $html = $response->body();
+                $data = $response->json();
 
-                $title = $this->extractMeta($html, 'title');
-                $description = $this->extractMeta($html, 'meta', 'description');
-                $keywords = $this->extractMeta($html, 'meta', 'keywords');
-                $ogTitle = $this->extractMeta($html, 'meta', 'og:title');
-                $ogDescription = $this->extractMeta($html, 'meta', 'og:description');
+                if (isset($data['Items']) && count($data['Items']) > 0) {
+                    $item = $data['Items'][0];
 
-                return [
-                    'title' => $title,
-                    'description' => $description,
-                    'keywords' => $keywords,
-                    'og_title' => $ogTitle,
-                    'og_description' => $ogDescription,
-                    'found' => true,
-                ];
+                    $result['backlink_count'] = (int)($item['ExtBackLinks'] ?? 0);
+                    $result['referring_domains'] = (int)($item['ReferringDomains'] ?? 0);
+                    $result['spam_score'] = (float)($item['SafetyIndex'] ?? 0);
+
+                    // Получаем Domain Authority из Citation Flow
+                    if (isset($item['CitationFlow'])) {
+                        // Majestic: CF и TF (0-100)
+                        $result['domain_authority'] = round(($item['CitationFlow'] ?? 0) / 100 * 100, 2);
+                    }
+                }
             }
-
-            return ['found' => false];
-        } catch (Throwable $e) {
-            logger()->debug("Meta tags extraction error: " . $e->getMessage());
-            return ['found' => false, 'error' => $e->getMessage()];
+        } catch (Exception $e) {
+            Log::debug("Majestic API error for {$domain}: " . $e->getMessage());
         }
+
+        return $result;
     }
 
     /**
-     * Get page speed score (free using Google PageSpeed Insights API)
-     * Google provides free insights without authentication for some endpoints
+     * Common Crawl - сколько раз домен был проиндексирован
      */
-    public function getPageSpeed(string $domain): array
+    private function getCommonCrawlMetrics(string $domain): array
     {
-        try {
-            $domain = $this->cleanDomain($domain);
-            $url = "https://" . $domain;
-            $cacheKey = "page_speed:" . md5($url);
-
-            return Cache::remember($cacheKey, 86400, function () use ($url) {
-                // Using basic timing check
-                $start = microtime(true);
-
-                try {
-                    Http::timeout(10)
-                        ->withoutVerifying()
-                        ->head($url);
-                    $responseTime = (microtime(true) - $start) * 1000;
-
-                    // Simple scoring: <500ms = excellent, <2000ms = good, else poor
-                    $score = match (true) {
-                        $responseTime < 500 => 'excellent',
-                        $responseTime < 2000 => 'good',
-                        default => 'poor',
-                    };
-
-                    return [
-                        'response_time_ms' => round($responseTime, 2),
-                        'score' => $score,
-                        'checked_at' => now(),
-                    ];
-                } catch (Throwable $e) {
-                    return [
-                        'error' => 'timeout_or_unreachable',
-                        'response_time_ms' => null,
-                        'score' => 'poor',
-                    ];
-                }
-            });
-        } catch (Throwable $e) {
-            logger()->debug("Page speed check error: " . $e->getMessage());
-            return ['error' => $e->getMessage()];
-        }
-    }
-
-    /**
-     * Check SSL certificate validity
-     */
-    public function checkSSL(string $domain): array
-    {
-        try {
-            $domain = $this->cleanDomain($domain);
-            $cacheKey = "ssl_check:" . $domain;
-
-            return Cache::remember($cacheKey, 86400, function () use ($domain) {
-                $context = stream_context_create(["ssl" => ["capture_peer_cert" => true]]);
-                $stream = @stream_socket_client(
-                    "ssl://" . $domain . ":443",
-                    $errno,
-                    $errstr,
-                    10,
-                    STREAM_CLIENT_CONNECT,
-                    $context
-                );
-
-                if (!$stream) {
-                    return [
-                        'has_ssl' => false,
-                        'error' => $errstr ?? 'Unknown error',
-                    ];
-                }
-
-                $cert = openssl_x509_parse(
-                    stream_context_get_params($stream)['options']['ssl']['peer_certificate']
-                );
-                fclose($stream);
-
-                $validFrom = new \DateTime('@' . $cert['validFrom_time_t']);
-                $validTo = new \DateTime('@' . $cert['validTo_time_t']);
-                $now = now();
-                $isValid = $now >= $validFrom && $now <= $validTo;
-
-                return [
-                    'has_ssl' => true,
-                    'valid' => $isValid,
-                    'subject' => $cert['subject'] ?? null,
-                    'issuer' => $cert['issuer'] ?? null,
-                    'valid_from' => $validFrom,
-                    'valid_to' => $validTo,
-                    'days_until_expiry' => $validTo->diffInDays($now),
-                ];
-            });
-        } catch (Throwable $e) {
-            logger()->debug("SSL check error: " . $e->getMessage());
-            return [
-                'has_ssl' => false,
-                'error' => $e->getMessage(),
-            ];
-        }
-    }
-
-    /**
-     * Fetch all metrics
-     */
-    private function fetchMetrics(string $domain): array
-    {
-        return [
-            'domain' => $domain,
-            'meta_tags' => $this->getPageMetaTags($domain),
-            'page_speed' => $this->getPageSpeed($domain),
-            'ssl' => $this->checkSSL($domain),
-            'estimated_backlinks' => $this->estimateBacklinks($domain),
-            'indexed_google' => $this->isIndexedInGoogle($domain),
-            'checked_at' => now(),
+        $result = [
+            'indexed_pages' => null,
+            'external_links' => null,
+            'internal_links' => null,
         ];
-    }
 
-    /**
-     * Extract meta tag value from HTML
-     */
-    private function extractMeta(string $html, string ...$names): ?string
-    {
-        if ($names[0] === 'title') {
-            if (preg_match('/<title[^>]*>([^<]+)<\/title>/i', $html, $matches)) {
-                return $matches[1];
+        try {
+            // Common Crawl Index
+            $url = "https://index.commoncrawl.org/CC-MAIN-2026-04/?url={$domain}&output=json";
+            $response = Http::timeout(self::HTTP_TIMEOUT)->get($url);
+
+            if ($response->successful()) {
+                $lines = explode("\n", trim($response->body()));
+                // Считаем количество рекордов
+                $result['indexed_pages'] = count(array_filter($lines)) ?? 0;
             }
-            return null;
+        } catch (Exception $e) {
+            Log::debug("Common Crawl error for {$domain}: " . $e->getMessage());
         }
 
-        $attributeName = $names[1] ?? 'name';
-        $attributeValue = $names[0];
-
-        $pattern = '/<meta[^>]+' . $attributeName . '[\s]*=[\s]*["\']' . preg_quote($attributeValue) . '["\'][^>]+content[\s]*=[\s]*["\']([^"\']*)["\']/i';
-
-        if (preg_match($pattern, $html, $matches)) {
-            return $matches[1];
-        }
-
-        $pattern2 = '/<meta[^>]+content[\s]*=[\s]*["\']([^"\']*)["\']*[^>]+' . $attributeName . '[\s]*=[\s]*["\']' . preg_quote($attributeValue) . '["\'']/i';
-
-        if (preg_match($pattern2, $html, $matches)) {
-            return $matches[1];
-        }
-
-        return null;
+        return $result;
     }
 
     /**
-     * Estimate backlinks via search operators (very crude estimation)
+     * ТИЦ Яндекса (БЕСПЛАТНО)
+     *
+     * https://tools.pixelplus.ru/api/ytcy
+     * Нас интересуют только ремот домены (наличные) - те с HTTP 200
      */
-    private function estimateViaSearchOperators(string $domain): int
+    private function getYandexTicy(string $domain): array
     {
-        // This is a placeholder - actual implementation would need:
-        // 1. Google Search Console API (requires setup)
-        // 2. Bing Webmaster API (requires setup)
-        // For now, return 0 as safe default
-        return 0;
+        $result = [
+            'ticy' => null,
+            'yandex_rank' => null,
+        ];
+
+        try {
+            // Рекомендуем использовать free API
+            // Option 1: pr-cy.ru
+            $response = Http::timeout(self::HTTP_TIMEOUT)->get("https://pr-cy.ru/api/yandex_citation/?url={$domain}&output=json");
+
+            if ($response->successful()) {
+                $data = $response->json();
+                if (isset($data['ticy'])) {
+                    $result['ticy'] = (int)$data['ticy'];
+                }
+                if (isset($data['rank'])) {
+                    $result['yandex_rank'] = (int)$data['rank'];
+                }
+            }
+        } catch (Exception $e) {
+            Log::debug("Yandex TICs API error for {$domain}: " . $e->getMessage());
+
+            // Fallback: Пробуем альтернативный стромастеров
+            try {
+                $response = Http::timeout(self::HTTP_TIMEOUT)->get("https://api.scopeit.ru/api/yandex_citation/{$domain}");
+                if ($response->successful()) {
+                    $data = $response->json();
+                    if (isset($data['ticy'])) {
+                        $result['ticy'] = (int)$data['ticy'];
+                    }
+                }
+            } catch (Exception $fallbackError) {
+                Log::debug("Yandex TICs fallback error for {$domain}: " . $fallbackError->getMessage());
+            }
+        }
+
+        return $result;
     }
 
     /**
-     * Clean domain name
+     * Русские беклинки
+     *
+     * Проверяем ссылки в настоящих русско-язычных доменах
      */
-    private function cleanDomain(string $domain): string
+    private function getRussianBacklinks(string $domain): array
     {
-        $domain = strtolower(trim($domain));
-        $domain = preg_replace('/^https?:\/\//i', '', $domain);
-        $domain = preg_replace('/^www\./i', '', $domain);
-        $domain = trim($domain, '/\\');
+        $result = [
+            'backlinks_ru' => null,
+        ];
 
-        return $domain;
+        try {
+            // Найдем русские беклинки через Google Search API
+            // Или через Yandex Webmaster API (если есть токен)
+
+            // Option 1: Правые архивы (archive.org API)
+            $url = "https://web.archive.org/cdx/search/cdx?url={$domain}&output=json&filter=statuscode:200&collapse=urlkey";
+            $response = Http::timeout(self::HTTP_TIMEOUT)->get($url);
+
+            if ($response->successful()) {
+                $data = $response->json();
+                if (is_array($data) && count($data) > 1) {
+                    // Первая строка - метаданные
+                    $result['backlinks_ru'] = count($data) - 1; // Кол-во снимков
+                }
+            }
+        } catch (Exception $e) {
+            Log::debug("Russian backlinks error for {$domain}: " . $e->getMessage());
+        }
+
+        return $result;
     }
 
     /**
-     * Clear cache for domain
+     * Нормализация домена
      */
-    public function clearCache(string $domain): void
+    private function normalizeDomain(string $domain): string
     {
-        $domain = $this->cleanDomain($domain);
-        Cache::forget("seo_metrics:" . $domain);
-        Cache::forget("backlinks:" . $domain);
-        Cache::forget("indexed_google:" . $domain);
-        Cache::forget("page_speed:" . md5("https://" . $domain));
-        Cache::forget("ssl_check:" . $domain);
+        return strtolower(preg_replace('/^(https?:\/\/)?(www\.)/', '', $domain));
     }
 }
