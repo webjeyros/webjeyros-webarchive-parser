@@ -46,6 +46,13 @@ class Domain extends Model
         'metrics_source',
         'metrics_checked_at',
         'metrics_available',
+        'first_captured',
+        'last_captured',
+        'capture_count',
+        'webpage_count',
+        'image_count',
+        'video_count',
+        'audio_count',
     ];
 
     protected $casts = [
@@ -59,6 +66,11 @@ class Domain extends Model
         'metrics_checked_at' => 'datetime',
         'created_at' => 'datetime',
         'updated_at' => 'datetime',
+        'capture_count' => 'integer',
+        'webpage_count' => 'integer',
+        'image_count' => 'integer',
+        'video_count' => 'integer',
+        'audio_count' => 'integer',
     ];
 
     public function project(): BelongsTo
