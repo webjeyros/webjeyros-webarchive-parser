@@ -5,7 +5,7 @@ namespace App\Jobs;
 use App\Models\Project;
 use App\Models\Keyword;
 use App\Models\Domain;
-use App\Services\WaybackService;
+use App\Services\WaybackAnchorService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -26,10 +26,11 @@ class ParseWaybackJob implements ShouldQueue
         private Keyword $keyword,
     ) {}
 
-    public function handle(WaybackService $waybackService): void
+    public function handle(WaybackAnchorService $waybackAnchorService): void
     {
         try {
-            $results = $waybackService->searchByKeyword($this->keyword->keyword);
+            // Search for keyword in title and text fields using Wayback anchor API
+            $results = $waybackAnchorService->searchByKeyword($this->keyword->keyword);
 
             DB::transaction(function () use ($results) {
                 foreach ($results as $result) {
@@ -42,7 +43,14 @@ class ParseWaybackJob implements ShouldQueue
                         [
                             'title' => $result['title'],
                             'snippet' => $result['snippet'],
-                            'archived_url' => $result['archived_url'],
+                            'archived_url' => $result['link'],
+                            'first_captured' => $result['first_captured'],
+                            'last_captured' => $result['last_captured'],
+                            'capture_count' => $result['capture_count'],
+                            'webpage_count' => $result['webpage_count'],
+                            'image_count' => $result['image_count'],
+                            'video_count' => $result['video_count'],
+                            'audio_count' => $result['audio_count'],
                             'status' => 'new',
                         ]
                     );

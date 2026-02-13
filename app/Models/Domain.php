@@ -21,6 +21,13 @@ class Domain extends Model
         'snippet',
         'archived_url',
         'checked_at',
+        'first_captured',
+        'last_captured',
+        'capture_count',
+        'webpage_count',
+        'image_count',
+        'video_count',
+        'audio_count',
     ];
 
     protected $casts = [
@@ -28,6 +35,11 @@ class Domain extends Model
         'checked_at' => 'datetime',
         'created_at' => 'datetime',
         'updated_at' => 'datetime',
+        'capture_count' => 'integer',
+        'webpage_count' => 'integer',
+        'image_count' => 'integer',
+        'video_count' => 'integer',
+        'audio_count' => 'integer',
     ];
 
     public function project(): BelongsTo
