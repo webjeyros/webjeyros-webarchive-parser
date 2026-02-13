@@ -72,9 +72,20 @@ return new class extends Migration
                 $table->unsignedInteger('internal_links')->nullable()->after('external_links');
             }
 
+            // NEW: Yandex metrics
+            if (!Schema::hasColumn('domains', 'ticy')) {
+                $table->unsignedInteger('ticy')->nullable()->after('internal_links')->comment('ТИЦ Яндекса');
+            }
+            if (!Schema::hasColumn('domains', 'yandex_rank')) {
+                $table->unsignedInteger('yandex_rank')->nullable()->after('ticy')->comment('Ранг я Яндекса');
+            }
+            if (!Schema::hasColumn('domains', 'backlinks_ru')) {
+                $table->unsignedInteger('backlinks_ru')->nullable()->after('yandex_rank')->comment('Русские беклинки');
+            }
+
             // Metadata
             if (!Schema::hasColumn('domains', 'metrics_source')) {
-                $table->string('metrics_source')->nullable()->after('internal_links');
+                $table->string('metrics_source')->nullable()->after('backlinks_ru');
             }
             if (!Schema::hasColumn('domains', 'metrics_checked_at')) {
                 $table->datetime('metrics_checked_at')->nullable()->after('metrics_source');
@@ -110,6 +121,9 @@ return new class extends Migration
                 'total_pages',
                 'external_links',
                 'internal_links',
+                'ticy',
+                'yandex_rank',
+                'backlinks_ru',
                 'metrics_source',
                 'metrics_checked_at',
                 'metrics_available',
