@@ -59,7 +59,13 @@ class ParseWaybackJob implements ShouldQueue
                 ->get();
 
             foreach ($newDomains as $domain) {
+                // Check availability first
                 CheckDomainAvailabilityJob::dispatch($domain)->onQueue('default');
+                
+                // Then check SEO metrics
+                CheckDomainSeoJob::dispatch($domain)
+                    ->delay(now()->addSeconds(5))
+                    ->onQueue('default');
             }
         } catch (Exception $e) {
             logger()->error("Wayback parsing failed for keyword {$this->keyword->keyword}: " . $e->getMessage());
